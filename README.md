@@ -1,5 +1,5 @@
-# Super Video — JEV AI × GPT-6 Astra Workbench
-
+Super Ai App generator 
+#  JEV AI × GPT-6 Astra Workbench
 A local-first application generator that coordinates two OpenAI-compatible API providers through a small multi-agent workflow:
 
 1. **Architect** — decomposes the request into an implementation plan.
