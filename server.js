@@ -4,91 +4,48 @@ const path = require('node:path');
 const { URL } = require('node:url');
 
 const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';
 const root = path.join(__dirname, 'public');
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 45_000);
+const MAX_TASK_LENGTH = 20_000;
+const MAX_RESPONSE_LENGTH = 1_000_000;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX || 10);
+const rateBuckets = new Map();
 
-function json(res, status, value) {
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
-  res.end(JSON.stringify(value));
-}
-function body(req) {
-  return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', chunk => { data += chunk; if (data.length > 2_000_000) req.destroy(); });
-    req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
-    req.on('error', reject);
-  });
-}
+function json(res, status, value) { res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); }
 function cleanBase(value) { return String(value || '').trim().replace(/\/+$/, ''); }
 function safeProvider(input = {}) {
   const baseUrl = cleanBase(input.baseUrl);
   if (baseUrl) {
     let parsed;
-    try { parsed = new URL(baseUrl); } catch { throw new Error(`${input.name || 'provider'} Base URL must be a valid HTTPS URL`); }
-    if (parsed.protocol !== 'https:') throw new Error(`${input.name || 'provider'} Base URL must use HTTPS`);
-    if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error(`${input.name || 'provider'} Base URL must not contain credentials or query parameters`);
+    try { parsed = new URL(baseUrl); } catch { throw new AppError(`${input.name || 'provider'} Base URL must be a valid HTTPS URL`, 400, 'INVALID_BASE_URL'); }
+    if (parsed.protocol !== 'https:') throw new AppError(`${input.name || 'provider'} Base URL must use HTTPS`, 400, 'HTTPS_REQUIRED');
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new AppError(`${input.name || 'provider'} Base URL must not contain credentials or query parameters`, 400, 'UNSAFE_BASE_URL');
   }
-  return {
-    name: input.name === 'astra' ? 'astra' : 'jev',
-    baseUrl,
-    apiKey: String(input.apiKey || ''),
-    model: String(input.model || '').trim(),
-    wireApi: input.wireApi === 'chat' ? 'chat' : 'responses'
-  };
+  return { name: input.name === 'astra' ? 'astra' : 'jev', baseUrl, apiKey: String(input.apiKey || ''), model: String(input.model || '').trim(), wireApi: input.wireApi === 'chat' ? 'chat' : 'responses' };
 }
+class AppError extends Error { constructor(message, status = 500, code = 'APP_ERROR') { super(message); this.status = status; this.code = code; } }
+function body(req) { return new Promise((resolve, reject) => { let data = ''; req.on('data', chunk => { data += chunk; if (data.length > 2_000_000) reject(new AppError('Request body is too large', 413, 'BODY_TOO_LARGE')); }); req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch { reject(new AppError('Request body must be valid JSON', 400, 'INVALID_JSON')); } }); req.on('error', reject); }); }
 function endpoint(provider, suffix) { return `${provider.baseUrl}/${suffix.replace(/^\/+/, '')}`; }
-function extractText(payload) {
-  if (!payload) return '';
-  if (typeof payload.output_text === 'string') return payload.output_text;
-  if (typeof payload.text === 'string') return payload.text;
-  const output = Array.isArray(payload.output) ? payload.output : [];
-  const fromOutput = output.flatMap(item => Array.isArray(item.content) ? item.content : []).map(x => x.text || x.value || '').filter(Boolean).join('\n');
-  if (fromOutput) return fromOutput;
-  return payload.choices?.[0]?.message?.content || payload.choices?.[0]?.text || '';
+function extractText(payload) { if (!payload || typeof payload !== 'object') return ''; if (typeof payload.output_text === 'string') return payload.output_text; if (typeof payload.text === 'string') return payload.text; const output = Array.isArray(payload.output) ? payload.output : []; const text = output.flatMap(item => Array.isArray(item.content) ? item.content : []).map(x => x?.text || x?.value || '').filter(Boolean).join('\n'); return text || payload.choices?.[0]?.message?.content || payload.choices?.[0]?.text || ''; }
+function validatePayload(payload, provider) { if (!payload || typeof payload !== 'object') throw new AppError(`${provider.name} returned an invalid JSON response`, 502, 'INVALID_PROVIDER_RESPONSE'); if (payload.error) throw new AppError(`${provider.name} returned an error`, 502, 'PROVIDER_ERROR'); return payload; }
+async function requestProvider(provider, suffix, payload) {
+  if (!provider.baseUrl || !provider.apiKey) throw new AppError(`${provider.name} provider is not configured`, 400, 'PROVIDER_NOT_CONFIGURED');
+  const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(endpoint(provider, suffix), { method: payload ? 'POST' : 'GET', headers: { authorization: `Bearer ${provider.apiKey}`, accept: 'application/json', ...(payload ? { 'content-type': 'application/json' } : {}) }, body: payload ? JSON.stringify(payload) : undefined, signal: controller.signal, redirect: 'error' });
+    const raw = await response.text(); if (raw.length > MAX_RESPONSE_LENGTH) throw new AppError(`${provider.name} response is too large`, 502, 'RESPONSE_TOO_LARGE');
+    let parsed; try { parsed = JSON.parse(raw); } catch { throw new AppError(`${provider.name} returned invalid JSON`, 502, 'INVALID_PROVIDER_RESPONSE'); }
+    if (!response.ok) { const status = response.status === 401 || response.status === 403 ? 401 : response.status === 429 ? 429 : 502; throw new AppError(`${provider.name} request failed (HTTP ${response.status})`, status, response.status === 429 ? 'PROVIDER_RATE_LIMIT' : 'PROVIDER_REQUEST_FAILED'); }
+    return validatePayload(parsed, provider);
+  } catch (error) { if (error instanceof AppError) throw error; if (error.name === 'AbortError') throw new AppError(`${provider.name} request timed out`, 504, 'PROVIDER_TIMEOUT'); throw new AppError(`${provider.name} request failed`, 502, 'PROVIDER_UNREACHABLE'); } finally { clearTimeout(timer); }
 }
-async function callModel(provider, prompt, system) {
-  if (!provider.baseUrl || !provider.apiKey || !provider.model) throw new Error(`${provider.name} provider is not configured`);
-  const isChat = provider.wireApi === 'chat';
-  const payload = isChat
-    ? { model: provider.model, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }], temperature: 0.2 }
-    : { model: provider.model, input: `${system}\n\nUSER TASK:\n${prompt}`, reasoning: { effort: 'high' } };
-  const response = await fetch(endpoint(provider, isChat ? 'chat/completions' : 'responses'), {
-    method: 'POST', headers: { authorization: `Bearer ${provider.apiKey}`, 'content-type': 'application/json', accept: 'application/json' }, body: JSON.stringify(payload)
-  });
-  const raw = await response.text();
-  let parsed; try { parsed = JSON.parse(raw); } catch { parsed = { text: raw }; }
-  if (!response.ok) throw new Error(`${provider.name} returned HTTP ${response.status}: ${parsed.error?.message || parsed.message || raw.slice(0, 300)}`);
-  return extractText(parsed) || JSON.stringify(parsed, null, 2);
-}
-async function orchestrate(input) {
-  const task = String(input.task || '').trim();
-  if (!task) throw new Error('Describe the application you want to generate.');
-  const jev = safeProvider({ ...input.jev, name: 'jev' });
-  const astra = safeProvider({ ...input.astra, name: 'astra' });
-  const shared = 'You are one member of a coordinated application-generation team. Be concrete, honest about uncertainty, and never invent API capabilities. Prefer secure, maintainable, production-ready solutions.';
-  const [architecture, implementation] = await Promise.all([
-    callModel(jev, task, `${shared}\nYou are the ARCHITECT. Return: product goal, user flows, data model, API boundaries, risks, and an ordered build plan.`),
-    callModel(astra, task, `${shared}\nYou are the BUILDER. Return a practical implementation proposal with file tree, key components, acceptance criteria, and starter code where useful.`)
-  ]);
-  const reviewPrompt = `Original task:\n${task}\n\nARCHITECTURE:\n${architecture}\n\nIMPLEMENTATION:\n${implementation}`;
-  const [critique, synthesis] = await Promise.all([
-    callModel(jev, reviewPrompt, `${shared}\nYou are the CRITIC. Find contradictions, security issues, missing requirements, and the fastest safe corrections. Keep it actionable.`),
-    callModel(astra, reviewPrompt, `${shared}\nYou are the DELIVERY LEAD. Produce a concise first-pass solution draft that reconciles both inputs and clearly marks assumptions.`)
-  ]);
-  const final = await callModel(astra, `TASK:\n${task}\n\nARCHITECT:\n${architecture}\n\nBUILDER:\n${implementation}\n\nCRITIC:\n${critique}\n\nDRAFT:\n${synthesis}`, `${shared}\nYou are the FINAL SYNTHESIZER. Deliver the best unique result: summary, recommended architecture, implementation steps, file tree, code or pseudocode for the critical path, security notes, and a verification checklist. Do not claim files were written.`);
-  return { architecture, implementation, critique, synthesis, final, agents: ['JEV Architect', 'GPT-6 Astra Builder', 'JEV Critic', 'GPT-6 Astra Delivery Lead', 'GPT-6 Astra Synthesizer'] };
-}
-function serve(req, res) {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  if (req.method === 'POST' && url.pathname === '/api/generate') {
-    body(req).then(input => orchestrate(input)).then(result => json(res, 200, { ok: true, result })).catch(error => json(res, 400, { ok: false, error: error.message }));
-    return;
-  }
-  if (req.method === 'GET' && url.pathname === '/api/config') {
-    return json(res, 200, { jev: { baseUrl: process.env.JEV_BASE_URL || '', model: process.env.JEV_MODEL || '' }, astra: { baseUrl: process.env.ASTRA_BASE_URL || '', model: process.env.ASTRA_MODEL || 'gpt-6-astra' } });
-  }
-  const requested = url.pathname === '/' ? '/index.html' : url.pathname;
-  const file = path.normalize(path.join(root, requested));
-  if (!file.startsWith(root)) return json(res, 403, { error: 'Forbidden' });
-  fs.readFile(file, (error, content) => { if (error) return json(res, 404, { error: 'Not found' }); const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' }; res.writeHead(200, { 'content-type': `${types[path.extname(file)] || 'application/octet-stream'}; charset=utf-8` }); res.end(content); });
-}
-http.createServer(serve).listen(PORT, () => console.log(`Super Video running at http://localhost:${PORT}`));
+async function callModel(provider, prompt, system) { if (!provider.model) throw new AppError(`${provider.name} model is required`, 400, 'MODEL_REQUIRED'); const isChat = provider.wireApi === 'chat'; const payload = isChat ? { model: provider.model, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }], temperature: 0.2 } : { model: provider.model, input: `${system}\n\nUSER TASK:\n${prompt}`, reasoning: { effort: 'high' } }; const result = await requestProvider(provider, isChat ? 'chat/completions' : 'responses', payload); const text = extractText(result); if (!text) throw new AppError(`${provider.name} returned no usable text`, 502, 'EMPTY_PROVIDER_RESPONSE'); return text; }
+async function testConnection(input) { const provider = safeProvider(input); if (!provider.model) throw new AppError(`${provider.name} model is required`, 400, 'MODEL_REQUIRED'); const models = await requestProvider(provider, 'models'); const data = Array.isArray(models) ? models : models.data; if (!Array.isArray(data)) throw new AppError(`${provider.name} returned an invalid model list`, 502, 'INVALID_MODEL_LIST'); const ids = data.map(item => typeof item === 'string' ? item : item?.id).filter(Boolean); return { ok: true, provider: provider.name, model: provider.model, modelAvailable: ids.includes(provider.model), models: ids.slice(0, 100) }; }
+async function orchestrate(input) { const task = String(input.task || '').trim(); if (!task) throw new AppError('Describe the application you want to generate.', 400, 'TASK_REQUIRED'); if (task.length > MAX_TASK_LENGTH) throw new AppError(`Task must be ${MAX_TASK_LENGTH} characters or fewer`, 413, 'TASK_TOO_LARGE'); const jev = safeProvider({ ...input.jev, name: 'jev' }); const astra = safeProvider({ ...input.astra, name: 'astra' }); const shared = 'You are one member of a coordinated application-generation team. Be concrete, honest about uncertainty, and never invent API capabilities. Prefer secure, maintainable, production-ready solutions.'; const [architecture, implementation] = await Promise.all([callModel(jev, task, `${shared}\nYou are the ARCHITECT. Return product goal, user flows, data model, API boundaries, risks, and an ordered build plan.`), callModel(astra, task, `${shared}\nYou are the BUILDER. Return a practical implementation proposal with file tree, key components, acceptance criteria, and starter code where useful.`)]); const reviewPrompt = `Original task:\n${task}\n\nARCHITECTURE:\n${architecture}\n\nIMPLEMENTATION:\n${implementation}`; const [critique, synthesis] = await Promise.all([callModel(jev, reviewPrompt, `${shared}\nYou are the CRITIC. Find contradictions, security issues, missing requirements, and the fastest safe corrections.`), callModel(astra, reviewPrompt, `${shared}\nYou are the DELIVERY LEAD. Produce a concise first-pass solution draft that reconciles both inputs.`)]); const final = await callModel(astra, `TASK:\n${task}\n\nARCHITECT:\n${architecture}\n\nBUILDER:\n${implementation}\n\nCRITIC:\n${critique}\n\nDRAFT:\n${synthesis}`, `${shared}\nYou are the FINAL SYNTHESIZER. Deliver the implementation-ready result with architecture, steps, file tree, critical code or pseudocode, security notes, and verification checklist.`); return { architecture, implementation, critique, synthesis, final, agents: ['JEV Architect', 'GPT-6 Astra Builder', 'JEV Critic', 'GPT-6 Astra Delivery Lead', 'GPT-6 Astra Synthesizer'] }; }
+function allowed(req) { const now = Date.now(); const key = req.socket.remoteAddress || 'unknown'; const bucket = rateBuckets.get(key) || { start: now, count: 0 }; if (now - bucket.start > RATE_LIMIT_WINDOW_MS) { bucket.start = now; bucket.count = 0; } bucket.count += 1; rateBuckets.set(key, bucket); return bucket.count <= RATE_LIMIT_MAX; }
+function serve(req, res) { const url = new URL(req.url, `http://${req.headers.host}`); if (req.method === 'POST' && (url.pathname === '/api/generate' || url.pathname === '/api/test-connection')) { if (!allowed(req)) return json(res, 429, { ok: false, error: 'Rate limit exceeded. Try again later.', code: 'RATE_LIMITED' }); body(req).then(input => url.pathname === '/api/test-connection' ? testConnection(input.provider || input) : orchestrate(input)).then(result => json(res, 200, { ok: true, result })).catch(error => json(res, error.status || 500, { ok: false, error: error.message, code: error.code || 'APP_ERROR' })); return; } if (req.method === 'GET' && url.pathname === '/api/config') return json(res, 200, { jev: { baseUrl: process.env.JEV_BASE_URL || '', model: process.env.JEV_MODEL || '' }, astra: { baseUrl: process.env.ASTRA_BASE_URL || '', model: process.env.ASTRA_MODEL || 'gpt-6-astra' } }); const requested = url.pathname === '/' ? '/index.html' : url.pathname; const file = path.normalize(path.join(root, requested)); if (!file.startsWith(root)) return json(res, 403, { error: 'Forbidden' }); fs.readFile(file, (error, content) => { if (error) return json(res, 404, { error: 'Not found' }); const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css' }; res.writeHead(200, { 'content-type': `${types[path.extname(file)] || 'application/octet-stream'}; charset=utf-8` }); res.end(content); }); }
+function createServer() { return http.createServer(serve); }
+if (require.main === module) createServer().listen(PORT, HOST, () => console.log(`Super Video running at http://${HOST}:${PORT}`));
+module.exports = { AppError, cleanBase, safeProvider, extractText, testConnection, createServer, orchestrate };
