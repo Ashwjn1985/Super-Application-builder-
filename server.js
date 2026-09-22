@@ -20,9 +20,16 @@ function body(req) {
 }
 function cleanBase(value) { return String(value || '').trim().replace(/\/+$/, ''); }
 function safeProvider(input = {}) {
+  const baseUrl = cleanBase(input.baseUrl);
+  if (baseUrl) {
+    let parsed;
+    try { parsed = new URL(baseUrl); } catch { throw new Error(`${input.name || 'provider'} Base URL must be a valid HTTPS URL`); }
+    if (parsed.protocol !== 'https:') throw new Error(`${input.name || 'provider'} Base URL must use HTTPS`);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error(`${input.name || 'provider'} Base URL must not contain credentials or query parameters`);
+  }
   return {
     name: input.name === 'astra' ? 'astra' : 'jev',
-    baseUrl: cleanBase(input.baseUrl),
+    baseUrl,
     apiKey: String(input.apiKey || ''),
     model: String(input.model || '').trim(),
     wireApi: input.wireApi === 'chat' ? 'chat' : 'responses'
