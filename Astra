@@ -1,1 +1,3 @@
-sk-s3qB5Rdm5RC3ENNjNmiPHYwHmGXqq1lCeDq8lED3fTQHPAvc
+# API key removed
+
+This file intentionally contains no credential. Configure `JEV_API_KEY` and `ASTRA_API_KEY` in a local `.env` file, or enter keys in the browser session.

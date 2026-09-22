@@ -1,0 +1,9 @@
+{
+  "name": "super-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JEV AI and GPT-6 Astra coordinated application generator",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
