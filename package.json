@@ -1,8 +1,9 @@
 {
-  "name": "Super Agents Application Generator",
-  "description": "gptAstra and JEV Both agents assisting in building an Application",
-  "version": "1.1.0",
+  "name": "super-agents-application-generator",
+  "displayName": "Super Agents Application Generator",
+  "version": "1.2.0",
   "private": true,
+  "description": "A two-provider application generator using GPT-6 Astra and JEV AI to plan, build, critique, and refine applications.",
   "author": "Krishna@Artificial Intelligence",
   "scripts": {
     "start": "node server.js",

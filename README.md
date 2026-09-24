@@ -1,37 +1,48 @@
-Super Ai App generator 
-#  JEV AI × GPT-6 Astra Workbench
-A local-first application generator that coordinates two OpenAI-compatible API providers through a small multi-agent workflow:
+# Super Agents Application Generator
 
-1. **Architect** — decomposes the request into an implementation plan.
-2. **Builder** — proposes the app structure and implementation.
-3. **Critic** — checks security, feasibility, and missing requirements.
-4. **Synthesizer** — combines the results into a polished deliverable.
+A local-first application generator using two OpenAI-compatible providers: **GPT-6 Astra** and **JEV AI**.
 
-The UI never sends API keys directly to a third-party API. The Node server keeps keys in memory and proxies requests from the browser.
+It helps turn an application idea into a practical delivery plan through four stages:
+
+1. **Architect** — decomposes the request into requirements, user journeys, and technical architecture.
+2. **Builder** — proposes the application structure, data model, APIs, UI, and implementation approach.
+3. **Critic** — checks security, feasibility, accessibility, risks, and missing requirements.
+4. **Synthesizer** — combines the work into one implementation-ready result.
 
 ## Run
 
 ```bash
 npm install
+npm test
 npm start
 ```
 
-Open http://localhost:3000.
+Open http://localhost:3000. Node.js 18+ is required.
 
-## Provider setup
+## Provider configuration
 
-In the UI, enter each provider's OpenAI-compatible Base URL, API key, and model ID. JEV AI and GPT-6 Astra can use different endpoints. The default paths are `/models` and `/responses`; switch to Chat Completions if a provider does not support Responses.
+The UI supports GPT-6 Astra and JEV AI provider cards. Each provider can be configured with:
 
-Environment variables may also be used:
+- HTTPS-compatible base URL
+- API key
+- Model ID
+- Responses API or Chat Completions wire format
+
+Environment variables can also be supplied by the host process. Copy `.env.example` to your deployment configuration; Node does not automatically load `.env` files.
 
 ```bash
-JEV_BASE_URL=https://your-jev-gateway.example/v1
-JEV_API_KEY=replace-me
-JEV_MODEL=jev-model
 ASTRA_BASE_URL=https://your-astra-gateway.example/v1
 ASTRA_API_KEY=replace-me
 ASTRA_MODEL=gpt-6-astra
-PORT=3000
+ASTRA_WIRE_API=responses
+JEV_BASE_URL=https://your-jev-gateway.example/v1
+JEV_API_KEY=replace-me
+JEV_MODEL=jev-model
+JEV_WIRE_API=responses
 ```
 
-Never commit real keys. The previous `Astra` file contained a credential-shaped value; rotate it at the issuing service and keep credentials in environment variables or the local UI session only.
+The browser does not persist API keys. Never commit real keys, and rotate any credential that has appeared in a commit or log.
+
+## Scope
+
+The generator is intended to assist with application discovery and delivery planning for Android, web, and other platforms. Include the target users, workflows, offline requirements, attachments, roles, accessibility, privacy, integrations, and testing expectations in the mission brief so the agents can address them.
