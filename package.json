@@ -1,8 +1,8 @@
 {
-  "name": "super-video",
+  "name": "Super Agents Application Generator",
+  "description": "gptAstra and JEV Both agents assisting in building an Application",
   "version": "1.1.0",
   "private": true,
-  "description": "Krishna@Artificial Intelligence — coordinated JEV AI and GPT-6 Astra application generator",
   "author": "Krishna@Artificial Intelligence",
   "scripts": {
     "start": "node server.js",
